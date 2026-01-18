@@ -3,11 +3,9 @@ import joblib
 import numpy as np
 import pandas as pd
 import os
-from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
-import av
+from audio_recorder_streamlit import audio_recorder
 import tempfile
 import whisper
-from pydub import AudioSegment
 import io
 
 
@@ -305,124 +303,62 @@ def main():
     with tab2:
         st.markdown("### 🎙️ Record Live Patient-Nurse Call")
         st.markdown("""
-        **Real-time call analysis workflow:**
-        1. Click "Start Recording" to begin capturing audio
-        2. Have your patient-nurse conversation
-        3. Click "Stop" when finished
-        4. Audio will be automatically transcribed using Whisper AI
-        5. Transcript is analyzed for adverse events
+        **Simple audio recording workflow:**
+        1. Click the microphone button below to start recording
+        2. Speak your patient-nurse conversation
+        3. Click stop when finished
+        4. Audio automatically saves - then click "Transcribe & Analyze"
         """)
         
-        if 'audio_frames' not in st.session_state:
-            st.session_state.audio_frames = []
         if 'transcript' not in st.session_state:
             st.session_state.transcript = ""
         
-        col1, col2 = st.columns([2, 1])
+        st.markdown("#### 🎤 Record Audio")
+        st.info("Click the microphone icon below, speak, then click stop. Grant microphone permission when prompted.")
         
-        with col1:
-            st.markdown("#### 🎤 Audio Recorder")
-            
-            RTC_CONFIGURATION = RTCConfiguration(
-                {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
-            )
-            
-            class AudioProcessor:
-                def recv(self, frame):
-                    # Capture audio frame directly to session state
-                    sound = frame.to_ndarray()
-                    if 'audio_frames' in st.session_state:
-                        st.session_state.audio_frames.append(sound)
-                    return frame
-            
-            webrtc_ctx = webrtc_streamer(
-                key="audio-recorder",
-                mode=WebRtcMode.SENDONLY,
-                rtc_configuration=RTC_CONFIGURATION,
-                media_stream_constraints={"video": False, "audio": True},
-                audio_processor_factory=AudioProcessor,
-                async_processing=True,
-            )
-            
-            # Track recording state
-            if 'recording_started' not in st.session_state:
-                st.session_state.recording_started = False
-            
-            if webrtc_ctx.state.playing and not st.session_state.recording_started:
-                st.session_state.recording_started = True
-                st.session_state.audio_frames = []  # Clear on new recording
-            elif not webrtc_ctx.state.playing and st.session_state.recording_started:
-                st.session_state.recording_started = False
-            
-            # Show recording status with detailed feedback
-            if webrtc_ctx.state.playing:
-                st.success("🔴 RECORDING - Speak into microphone NOW!")
-                frame_count = len(st.session_state.audio_frames)
-                st.metric("Audio Chunks Captured", frame_count)
-                
-                if frame_count == 0:
-                    st.error("⚠️ NO AUDIO DETECTED! Troubleshoot:")
-                    st.markdown("""
-                    - Did you click "Allow" for microphone permission?
-                    - Is correct microphone selected in browser?
-                    - Is microphone muted or disabled?
-                    - Are other apps blocking microphone access?
-                    """)
-                else:
-                    duration = frame_count * 0.02  # ~20ms per chunk
-                    st.success(f"✅ Audio flowing! (~{duration:.1f}s recorded)")
-            else:
-                if st.session_state.audio_frames:
-                    st.success(f"✅ Recording complete: {len(st.session_state.audio_frames)} chunks")
-                    st.info("👇 Click 'Transcribe Recording' button below")
-                else:
-                    st.info("💡 Click START (allow mic when browser prompts)")
+        # Simple audio recorder - returns audio bytes when recording is complete
+        audio_bytes = audio_recorder(
+            text="Click to record",
+            recording_color="#e74c3c",
+            neutral_color="#3498db",
+            icon_name="microphone",
+            icon_size="3x",
+        )
         
-        with col2:
-            st.markdown("#### ⚙️ Controls")
+        if audio_bytes:
+            st.success("✅ Audio recorded successfully!")
             
-            whisper_model = load_whisper_model()
+            # Save audio to temporary file
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_audio:
+                tmp_audio.write(audio_bytes)
+                audio_path = tmp_audio.name
             
-            if st.button("🗑️ Clear Recording"):
-                st.session_state.audio_frames = []
-                st.session_state.transcript = ""
-                st.success("✅ Recording cleared!")
-                st.rerun()
+            # Show audio player
+            st.audio(audio_bytes, format="audio/wav")
             
-            if st.button("🎤 Transcribe Recording", type="primary", disabled=(not whisper_model)):
-                if webrtc_ctx.state.playing:
-                    st.warning("⚠️ Please stop recording first by clicking 'START' button again!")
-                elif not st.session_state.audio_frames:
-                    st.error("❌ No audio recorded! Please record audio first.")
-                else:
-                    with st.spinner("🔄 Transcribing audio with Whisper AI..."):
-                        try:
-                            # Combine all audio frames
-                            st.info(f"Processing {len(st.session_state.audio_frames)} audio chunks...")
-                            combined_audio = np.concatenate(st.session_state.audio_frames)
-                            
-                            # Save to temporary WAV file
-                            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
-                                # Convert to audio segment and save
-                                audio_segment = AudioSegment(
-                                    combined_audio.tobytes(),
-                                    frame_rate=48000,
-                                    sample_width=2,
-                                    channels=1
-                                )
-                                audio_segment.export(tmp_file.name, format="wav")
-                                
-                                # Transcribe with Whisper
-                                result = whisper_model.transcribe(tmp_file.name)
-                                st.session_state.transcript = result["text"]
-                                
-                                os.unlink(tmp_file.name)
-                            
-                            st.success("✅ Transcription complete!")
-                        except Exception as e:
-                            st.error(f"❌ Transcription error: {e}")
-                            st.exception(e)
+            # Transcribe button
+            if st.button("🎤 Transcribe & Analyze", type="primary", use_container_width=True):
+                with st.spinner("🔄 Transcribing audio with Whisper AI..."):
+                    try:
+                        # Load Whisper model
+                        whisper_model = load_whisper_model()
+                        
+                        # Transcribe
+                        result = whisper_model.transcribe(audio_path)
+                        st.session_state.transcript = result["text"]
+                        
+                        # Clean up temp file
+                        os.unlink(audio_path)
+                        
+                        st.success("✅ Transcription complete!")
+                    except Exception as e:
+                        st.error(f"❌ Transcription error: {e}")
+                        if os.path.exists(audio_path):
+                            os.unlink(audio_path)
+        else:
+            st.info("👆 Click the microphone to start recording")
         
+        # Show transcript and analysis
         if st.session_state.transcript:
             st.markdown("---")
             st.markdown("### 📝 Transcribed Conversation")
