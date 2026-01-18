@@ -16,6 +16,12 @@ xgboost==2.0.3
 
 # Streamlit
 streamlit==1.29.0
+streamlit-webrtc==0.47.1
+
+# Audio Processing & Transcription
+openai-whisper==20231117
+soundfile==0.12.1
+pydub==0.25.1
 
 # Utilities
 joblib==1.3.2

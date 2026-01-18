@@ -3,6 +3,12 @@ import joblib
 import numpy as np
 import pandas as pd
 import os
+from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
+import av
+import tempfile
+import whisper
+from pydub import AudioSegment
+import io
 
 # Page config
 st.set_page_config(
@@ -96,6 +102,16 @@ def load_models():
         st.error("⚠️ This may be due to scikit-learn version mismatch between training and deployment.")
         st.info("💡 Solution: Models need to be retrained with scikit-learn==1.3.2 and saved again.")
         st.stop()
+
+# Load Whisper model
+@st.cache_resource
+def load_whisper_model():
+    """Load Whisper model for transcription"""
+    try:
+        return whisper.load_model("base")
+    except Exception as e:
+        st.warning(f"⚠️ Could not load Whisper model: {e}")
+        return None
 
 # Risk categories
 HIGH_RISK = {"emergency", "allergic_reaction", "medication_error"}
@@ -231,7 +247,7 @@ def main():
         st.markdown("**Hackathon:** 2026")
     
     # Input tabs
-    tab1, tab2 = st.tabs(["📝 Manual Input", "📄 Example Cases"])
+    tab1, tab2, tab3 = st.tabs(["📝 Manual Input", "🎙️ Live Call Recording", "📄 Example Cases"])
     
     with tab1:
         st.markdown("### Enter Patient-Nurse Conversation")
@@ -311,6 +327,156 @@ def main():
                         st.info("✅ No adverse events detected. This appears to be a routine visit.")
     
     with tab2:
+        st.markdown("### 🎙️ Record Live Patient-Nurse Call")
+        st.markdown("""
+        **Real-time call analysis workflow:**
+        1. Click "Start Recording" to begin capturing audio
+        2. Have your patient-nurse conversation
+        3. Click "Stop" when finished
+        4. Audio will be automatically transcribed using Whisper AI
+        5. Transcript is analyzed for adverse events
+        """)
+        
+        # Initialize session state for audio
+        if 'audio_frames' not in st.session_state:
+            st.session_state.audio_frames = []
+        if 'transcript' not in st.session_state:
+            st.session_state.transcript = ""
+        
+        col1, col2 = st.columns([2, 1])
+        
+        with col1:
+            st.markdown("#### 🎤 Audio Recorder")
+            
+            # WebRTC configuration
+            RTC_CONFIGURATION = RTCConfiguration(
+                {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+            )
+            
+            # Audio recorder
+            class AudioProcessor:
+                def __init__(self):
+                    self.frames = []
+                
+                def recv(self, frame):
+                    sound = frame.to_ndarray()
+                    self.frames.append(sound)
+                    return frame
+            
+            webrtc_ctx = webrtc_streamer(
+                key="audio-recorder",
+                mode=WebRtcMode.SENDONLY,
+                rtc_configuration=RTC_CONFIGURATION,
+                media_stream_constraints={"video": False, "audio": True},
+                audio_receiver_size=1024,
+            )
+            
+            st.info("💡 Click 'START' above to begin recording your conversation")
+        
+        with col2:
+            st.markdown("#### ⚙️ Controls")
+            
+            whisper_model = load_whisper_model()
+            
+            if st.button("🎤 Transcribe Recording", type="primary", disabled=(not whisper_model)):
+                if webrtc_ctx.state.playing:
+                    st.warning("⚠️ Please stop recording first!")
+                else:
+                    with st.spinner("🔄 Transcribing audio..."):
+                        try:
+                            # Get audio data from webrtc
+                            if webrtc_ctx.audio_receiver:
+                                audio_frames = webrtc_ctx.audio_receiver.get_frames(timeout=1)
+                                
+                                if audio_frames:
+                                    # Combine audio frames
+                                    combined_audio = np.concatenate([frame.to_ndarray() for frame in audio_frames])
+                                    
+                                    # Save to temporary file
+                                    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
+                                        # Convert to audio segment and save
+                                        audio_segment = AudioSegment(
+                                            combined_audio.tobytes(),
+                                            frame_rate=48000,
+                                            sample_width=2,
+                                            channels=1
+                                        )
+                                        audio_segment.export(tmp_file.name, format="wav")
+                                        
+                                        # Transcribe with Whisper
+                                        result = whisper_model.transcribe(tmp_file.name)
+                                        st.session_state.transcript = result["text"]
+                                        
+                                        os.unlink(tmp_file.name)
+                                    
+                                    st.success("✅ Transcription complete!")
+                                else:
+                                    st.warning("⚠️ No audio data captured. Please record something first.")
+                        except Exception as e:
+                            st.error(f"❌ Transcription error: {e}")
+            
+            if st.button("🗑️ Clear Recording"):
+                st.session_state.transcript = ""
+                st.session_state.audio_frames = []
+                st.rerun()
+        
+        # Show transcript
+        if st.session_state.transcript:
+            st.markdown("---")
+            st.markdown("### 📝 Transcribed Conversation")
+            
+            transcript_text = st.text_area(
+                "Edit transcript if needed:",
+                value=st.session_state.transcript,
+                height=200,
+                key="transcript_editor"
+            )
+            
+            if st.button("🔍 Analyze Transcription", type="primary", use_container_width=True):
+                with st.spinner("🔄 Analyzing conversation..."):
+                    # Get predictions
+                    result = predict_adverse_events(transcript_text, models)
+                    
+                    # Display results
+                    st.markdown("---")
+                    st.markdown("## 📊 Analysis Results")
+                    
+                    # Risk level display
+                    risk_level = result['risk_level']
+                    if risk_level == "CRITICAL":
+                        st.markdown('<div class="risk-critical">🚨 CRITICAL RISK - IMMEDIATE ATTENTION REQUIRED</div>', unsafe_allow_html=True)
+                    elif risk_level == "HIGH":
+                        st.markdown('<div class="risk-high">⚠️ HIGH RISK - PROMPT ACTION NEEDED</div>', unsafe_allow_html=True)
+                    elif risk_level == "MODERATE":
+                        st.markdown('<div class="risk-moderate">⚡ MODERATE RISK - MONITOR CLOSELY</div>', unsafe_allow_html=True)
+                    else:
+                        st.markdown('<div class="risk-none">✅ NO ADVERSE EVENTS DETECTED</div>', unsafe_allow_html=True)
+                    
+                    st.markdown("")
+                    
+                    # Metrics
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Overall Confidence", f"{result['confidence']}%")
+                    with col2:
+                        st.metric("Event Probability", f"{result['binary_probability']}%")
+                    with col3:
+                        st.metric("Categories Detected", len(result['predicted_categories']))
+                    
+                    # Detected events
+                    if result['predicted_categories'] != ["no_adverse_event"]:
+                        st.markdown("### 🏷️ Detected Adverse Events:")
+                        
+                        for category in result['predicted_categories']:
+                            with st.expander(f"**{category.replace('_', ' ').title()}**", expanded=True):
+                                st.markdown(f"<div class='event-card'>{EVENT_DESCRIPTIONS.get(category, 'Medical event detected')}</div>", unsafe_allow_html=True)
+                                if category in result['category_probabilities']:
+                                    st.progress(result['category_probabilities'][category] / 100)
+                                    st.caption(f"Confidence: {result['category_probabilities'][category]}%")
+                    else:
+                        st.info("✅ No adverse events detected. This appears to be a routine visit.")
+    
+    with tab3:
         st.markdown("### 📋 Example Test Cases")
         st.markdown("Click any example below to analyze it:")
         
