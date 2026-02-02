@@ -127,8 +127,8 @@ Built for Hackathon 2026 🚀
 
 ## 📧 Contact
 
-GitHub: [@GarvitK13](https://github.com/GarvitK13)
+GitHub: [@Rv43](https://github.com/Rv43)
+ [@GarvitK13](https://github.com/GarvitK13)
 [@SimaranGitCode](https://github.com/SimranGitCode)
-[@Rv43](https://github.com/Rv43)
 ---
 ⭐ Star if useful! Built with ❤️ for patient safety
